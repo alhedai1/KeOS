@@ -172,12 +172,11 @@
 //! [`alloc::collections`]: <https://doc.rust-lang.org/alloc/collections/index.html>
 
 use crate::syscall::SyscallAbi;
-use alloc::collections::BTreeMap;
+use alloc::{collections::BTreeMap, vec::Vec, vec};
 use keos::{
-    KernelError,
-    fs::{Directory, RegularFile},
-    syscall::flags::FileMode,
+    channel, fs::{Directory, RegularFile}, syscall::{flags::FileMode, uaccess}, teletype::Teletype, KernelError
 };
+use core::{cmp::min, u8};
 #[cfg(doc)]
 use keos::{channel, teletype};
 
@@ -389,7 +388,23 @@ impl FileStruct {
     ///   more than **1024 open files**, meaning no additional descriptors are
     ///   available.
     pub fn install_file(&mut self, file: File) -> Result<FileDescriptor, KernelError> {
-        todo!()
+        if self.files.len() >= 1024 {
+            return Err(KernelError::TooManyOpenFile)
+        }
+        else {
+            let num;
+            // if there is at least 1 entry in fd table
+            if let Some((key, _)) = self.files.last_key_value() {
+                num = key.0.clone() + 1;
+            }
+            // if fd table is empty
+            else {
+                num = 0;
+            }
+            let fd = FileDescriptor(num);
+            self.files.insert(fd, file);
+            Ok(fd)
+        }
     }
 
     /// Opens a file.
@@ -417,7 +432,36 @@ impl FileStruct {
     ///
     /// Returns the corresponding file descriptor number for the opened file.
     pub fn open(&mut self, abi: &SyscallAbi) -> Result<usize, KernelError> {
-        todo!()
+        let pathname_ptr = abi.arg1;
+        let flag = abi.arg2 as i32;
+        let fmode = match flag {
+            0 => FileMode::Read,
+            1 => FileMode::Write,
+            2 => FileMode::ReadWrite,
+            _ => return Err(KernelError::InvalidArgument)
+        };
+
+        let pathname = uaccess::UserCString::new(pathname_ptr).read()?;
+
+        // dir case
+
+        let file_inner = self.cwd.open(&pathname)?;
+        let file_tmp = file_inner.clone();
+
+        let file_kind = if let Some(dir) = file_tmp.into_directory() {
+            FileKind::Directory { dir: dir, position: 0 }
+        } else {
+            FileKind::RegularFile { file: file_inner.into_regular_file().unwrap(), position: 0 }
+        };
+
+        let file = File {
+            mode: fmode,
+            file: file_kind,
+        };
+
+        let fd = self.install_file(file)?;
+
+        Ok(fd.0 as usize)
     }
 
     /// Reads data from an open file.
@@ -443,7 +487,88 @@ impl FileStruct {
     ///
     /// Returns the actual number of bytes read.
     pub fn read(&mut self, abi: &SyscallAbi) -> Result<usize, KernelError> {
-        todo!()
+        let fd = FileDescriptor(abi.arg1 as i32);
+        let user_addr = abi.arg2;
+        let mut count = abi.arg3;
+        let user_buf = uaccess::UserU8SliceWO::new(user_addr, count);
+
+        let file = self.files.get_mut(&fd).ok_or(KernelError::BadFileDescriptor)?;
+        if let FileMode::Write = file.mode {
+            return Err(KernelError::InvalidArgument)
+        }
+        
+        match &mut file.file {
+            FileKind::Directory { dir, position } => return Err(KernelError::IsDirectory),
+            FileKind::RegularFile { file, position } => {
+                let mut total_read = 0;
+                let mut buf = Vec::<u8>::new();
+
+                if *position > file.size() {
+                    return Ok(0)
+                }
+
+                while total_read < count {
+                    // let bytes_to_read = min(buf.len(), count-total_read);
+                    if count > (file.size() - *position) {
+                        count = file.size() - *position;
+                    }
+                    let bytes_to_read = count - total_read;
+                    buf.resize(buf.len() + bytes_to_read, 0);
+                    let n = file.read(*position, &mut buf[..bytes_to_read])?;
+                    *position += n;
+                    total_read += n;
+                }
+                // self.files.get(&fd).unwrap().file.
+                let bytes_written = user_buf.put(&buf)?;
+                Ok(bytes_written)
+            }
+            FileKind::Rx(rx) => {
+                // if !rx.can_recv() {
+                //     return Err(KernelError::BrokenPipe)
+                // }
+                if count > rx.capacity() {
+                    count = rx.capacity();
+                }
+                let mut buf = vec![0u8; count];
+                let mut n = 0;
+                while n < count {
+                    match rx.try_recv() {
+                        Ok(byte) => {
+                            buf[n] = byte;
+                            n += 1;
+                        },
+                        Err(keos::channel::TryRecvError::Empty) => break,
+                        Err(keos::channel::TryRecvError::Disconnected) => {
+                            if n == 0 {
+                                return Err(KernelError::BrokenPipe)
+                            }
+                            else {
+                                break;
+                            }
+                        },
+                    }
+                }
+                user_buf.put(&buf[..n])?;
+                Ok(n)
+            }
+            FileKind::Tx(tx) => return Err(KernelError::BrokenPipe),
+
+            FileKind::Stdio => { // Stdin   
+                if fd.0 == 0 {
+                    let mut serial = keos::teletype::serial().lock();
+                    let mut buf = vec![0u8; count];
+                    let res = serial.read(&mut buf);
+                    serial.unlock();
+                    let n = res?;
+                    user_buf.put(&buf[..n])?;
+                    Ok(n)
+                }
+                else {
+                    return Err(KernelError::InvalidArgument)
+                }
+            }
+            // _ => return Err(KernelError::BadFileDescriptor),
+        }
     }
 
     /// Writes data to an open file.
@@ -470,7 +595,71 @@ impl FileStruct {
     ///
     /// Returns the number of bytes written
     pub fn write(&mut self, abi: &SyscallAbi) -> Result<usize, KernelError> {
-        todo!()
+        let fd = FileDescriptor(abi.arg1 as i32);
+        let user_buf_addr = abi.arg2;
+        let mut count = abi.arg3;
+        let user_buf = uaccess::UserU8SliceRO::new(user_buf_addr, count);
+
+        let file = self.files.get_mut(&fd).ok_or(KernelError::BadFileDescriptor)?;
+        if let FileMode::Read = file.mode {
+            return Err(KernelError::InvalidArgument)
+        }
+
+        match &mut file.file {
+            FileKind::Directory { dir, position } => return Err(KernelError::IsDirectory),
+            FileKind::RegularFile { file, position } => {
+                let mut total_written = 0;
+                let mut buf = user_buf.get()?;
+
+                // println!("{}", count);
+
+                while total_written < count {
+                    if count > (file.size() - *position) {
+                        count = file.size() - *position;
+                    }
+                    let bytes_to_write = count - total_written;
+                    let n = file.write(*position, &mut buf[..bytes_to_write])?;
+                    *position += n;
+                    total_written += n;
+                }
+                // self.files.get(&fd).unwrap().file.
+                Ok(total_written)
+            }
+            FileKind::Stdio => { // Stdout, Stderr
+                if fd.0 == 1 || fd.0 == 2 {
+                    let mut buf = user_buf.get()?;
+                    let mut serial = keos::teletype::serial().lock();
+                    let n = serial.write(&mut buf);
+                    serial.unlock();
+                    n
+                }
+                else {
+                    return Err(KernelError::InvalidArgument)
+                }
+            },
+            FileKind::Rx(rx) => return Err(KernelError::BrokenPipe),
+            FileKind::Tx(tx) => {
+                if !tx.can_send() {
+                    return Err(KernelError::BrokenPipe)
+                }
+
+                if count > tx.capacity() {
+                    count = tx.capacity();
+                }
+                let mut buf = user_buf.get()?;
+                let mut n = 0;
+                while n < count {
+                    match tx.try_send(buf[n]) {
+                        Ok(()) => {
+                            n += 1;
+                        },
+                        Err(keos::channel::TrySendError::Full(val)) => break,
+                        Err(keos::channel::TrySendError::Disconnected(val)) => break,
+                    }
+                }
+                Ok(n)
+            },
+        }
     }
 
     /// Seeks to a new position in the file.
@@ -502,7 +691,33 @@ impl FileStruct {
     ///
     /// Returns the new position of the file descriptor after moving it.
     pub fn seek(&mut self, abi: &SyscallAbi) -> Result<usize, KernelError> {
-        todo!()
+        let fd = FileDescriptor(abi.arg1 as i32);
+        let offset = abi.arg2 as i64;
+        let whence = abi.arg3 as i32;
+
+        let file = self.files.get_mut(&fd).ok_or(KernelError::BadFileDescriptor)?;
+        if let FileKind::RegularFile { file, position } = &mut file.file {
+            let current = *position as i64;
+            println!("position: {}, offset: {}, file size: {}", *position, offset, file.size());
+            let calculated_position = match whence {
+                0 => offset,
+                1 => {
+                    current + offset
+                },
+                2 => (file.size() as i64) + offset,
+                _ => return Err(KernelError::InvalidArgument),
+            };
+            println!("calculated position: {}", calculated_position);
+            // if calculated_position > (file.size() as i64) || calculated_position < 0 {
+            //     println!("invalid calculated position");
+            //     return Err(KernelError::InvalidArgument)
+            // }
+            *position = calculated_position as usize;
+            Ok(*position)
+        }   
+        else {
+            return Err(KernelError::InvalidArgument)
+        }
     }
 
     /// Tells the current position in the file.
@@ -525,7 +740,14 @@ impl FileStruct {
     ///
     /// Returns the position of the file descriptor.
     pub fn tell(&mut self, abi: &SyscallAbi) -> Result<usize, KernelError> {
-        todo!()
+        let fd = FileDescriptor(abi.arg1 as i32);
+        let file = self.files.get(&fd).ok_or(KernelError::BadFileDescriptor)?;
+        if let FileKind::RegularFile { file, position } = &file.file {
+            Ok(*position)
+        }
+        else {
+            Err(KernelError::InvalidArgument)
+        }
     }
 
     /// Closes an open file.
@@ -544,7 +766,9 @@ impl FileStruct {
     ///
     /// Returns 0 if success.
     pub fn close(&mut self, abi: &SyscallAbi) -> Result<usize, KernelError> {
-        todo!()
+        let fd = FileDescriptor(abi.arg1 as i32);
+        self.files.remove(&fd).ok_or(KernelError::BadFileDescriptor)?;
+        Ok(0)
     }
 
     /// Creates an interprocess communication channel between two file
@@ -565,6 +789,25 @@ impl FileStruct {
     ///
     /// Returns 0 if success.
     pub fn pipe(&mut self, abi: &SyscallAbi) -> Result<usize, KernelError> {
-        todo!()
+        // let fd_arr = abi.arg1;
+        // let fd0 = (fd_arr >> 32) as i32;
+        // let fd1 = (fd_arr & 0xFFFFFFFF) as i32;
+        // let rx_fd = FileDescriptor(fd0);
+        // let tx_fd = FileDescriptor(fd1);
+
+        let user_ptr = uaccess::UserPtrWO::new(abi.arg1);
+
+        let (tx, rx) = channel::channel(100);
+
+        let tx_file = File {mode: FileMode::Write, file: FileKind::Tx(tx)};
+        let rx_file = File {mode: FileMode::Read, file: FileKind::Rx(rx)};
+
+        let tx_fd = self.install_file(tx_file)?;
+        let rx_fd = self.install_file(rx_file)?;
+
+        let fd_arr = [rx_fd.0, tx_fd.0];
+
+        user_ptr.put(fd_arr)?;
+        Ok(0)
     }
 }

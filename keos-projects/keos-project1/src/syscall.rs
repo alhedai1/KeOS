@@ -162,7 +162,7 @@ impl<'a> SyscallAbi<'a> {
     ///
     /// [`Registers`]: ../../keos/syscall/struct.Registers.html
     pub fn from_registers(regs: &'a mut Registers) -> Self {
-        todo!()
+        SyscallAbi { sysno: regs.gprs.rax, arg1: regs.gprs.rdi, arg2: regs.gprs.rsi, arg3: regs.gprs.rdx, arg4: regs.gprs.r10, arg5: regs.gprs.r8, arg6: regs.gprs.r9, regs: regs }
     }
 
     /// Sets the return value for the system call.
@@ -179,6 +179,9 @@ impl<'a> SyscallAbi<'a> {
     ///   (`Ok(value)`) or the error type (`Err(KernelError)`).
     pub fn set_return_value(self, return_val: Result<usize, KernelError>) {
         // Set the return value in the registers based on the result.
-        todo!()
+        match return_val {
+            Ok(val) => self.regs.gprs.rax = val,
+            Err(e) => self.regs.gprs.rax = e.into_usize(),
+        };
     }
 }
