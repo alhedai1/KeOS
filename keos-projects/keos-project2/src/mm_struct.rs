@@ -92,12 +92,9 @@
 use crate::{page_table::PageTable, pager::Pager};
 use core::ops::Range;
 use keos::{
-    KernelError,
-    addressing::Va,
-    fs::RegularFile,
-    mm::{PageRef, page_table::Permission},
+    addressing::Va, fs::RegularFile, mm::{page_table::{Permission, PteFlags}, Page, PageRef}, KernelError
 };
-use keos_project1::{file_struct::FileStruct, syscall::SyscallAbi};
+use keos_project1::{file_struct::{FileDescriptor, FileKind, FileStruct}, syscall::SyscallAbi};
 
 /// The [`MmStruct`] represents the memory state for a specific process,
 /// corresponding to the Linux kernel's `struct mm_struct`.
@@ -169,7 +166,14 @@ impl<P: Pager> MmStruct<P> {
     /// - `true` if the memory range is valid.
     /// - `false` if the memory range is invalid or inaccessible.
     pub fn access_ok(&self, addr: Range<Va>, is_write: bool) -> bool {
-        todo!()
+        let mut va = addr.start;
+        while va.into_usize() < addr.end.into_usize() {
+            if !self.pager.access_ok(va, is_write) {
+                return false;
+            }
+            va += 1;
+        }
+        return true
     }
 
     /// Wrapper function for the pager's `mmap` method. It delegates the actual
@@ -249,7 +253,54 @@ impl<P: Pager> MmStruct<P> {
         fstate: &mut FileStruct,
         abi: &SyscallAbi,
     ) -> Result<usize, KernelError> {
-        self.do_mmap(todo!(), todo!(), todo!(), todo!(), todo!())
+        let addr = abi.arg1;
+        let length = abi.arg2;
+        let prot = abi.arg3;
+        let fd = FileDescriptor(abi.arg4 as i32);
+        let offset = abi.arg5;
+
+        // check addr is non-zero and page-aligned
+        if (addr == 0) || (addr & 0xFFF != 0) {
+            return Err(KernelError::InvalidArgument)
+        }
+
+        // check length is non-zero
+        if length == 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        // check fd is RegularFile or anonymous
+        let file = if let Some(file) = fstate.files.get(&fd) {
+            if let FileKind::RegularFile{file, position} = &file.file {
+                Some(file)
+            }
+            else {
+                return Err(KernelError::InvalidArgument)
+            }
+        }
+        else {
+            if fd.0 != -1 {
+                return Err(KernelError::InvalidArgument)
+            }
+            else {
+                None
+            }
+        };
+
+        // Check conflict with already mapped region
+        let mut va = Va::new(addr).ok_or(KernelError::InvalidArgument)?;
+        while va.into_usize() < (addr + length) {
+            if let Ok(pte) = self.page_table.walk(va) {
+                if pte.flags().contains(PteFlags::P) {return Err(KernelError::InvalidArgument)}
+            }
+            va += 1;
+        }
+
+        let va = Va::new(addr).ok_or(KernelError::InvalidArgument)?;
+        let perm = Permission::from_bits(prot).ok_or(KernelError::InvalidArgument)?;
+
+        self.do_mmap(va, length, perm, file, offset)?;
+        Ok(addr)
     }
 
     /// Unmaps a memory-mapped file region.
@@ -293,7 +344,21 @@ impl<P: Pager> MmStruct<P> {
     /// invalid or does not correspond to an active memory mapping.
     pub fn munmap(&mut self, abi: &SyscallAbi) -> Result<usize, KernelError> {
         // Calls the pager's munmap method with placeholders for arguments.
-        self.pager.munmap(&mut self.page_table, todo!())
+
+        // check if address is invalid
+        let addr = abi.arg1;
+        let va = Va::new(addr).ok_or(KernelError::InvalidArgument)?;
+        if let Ok(pte) = self.page_table.walk(va) {
+            if !pte.flags().contains(PteFlags::P) {
+                return Err(KernelError::InvalidArgument)
+            }
+        }
+        else {
+            return Err(KernelError::InvalidArgument)
+        }
+
+        self.pager.munmap(&mut self.page_table, va)?;
+        Ok(0)
     }
 
     /// Find a mapped page at the given virtual address and apply a function to

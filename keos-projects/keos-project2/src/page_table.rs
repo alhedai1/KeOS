@@ -138,6 +138,71 @@ use keos::{
     mm::{Page, page_table::*},
 };
 
+// Helper functions to convert Permission to page table entry flags
+fn permission_to_pte_flags(perm: Permission) -> PteFlags {
+    let mut flags = PteFlags::P; // Always present
+    
+    if perm.contains(Permission::WRITE) {
+        flags |= PteFlags::RW;
+    }
+    if perm.contains(Permission::USER) {
+        flags |= PteFlags::US;
+    }
+    if !perm.contains(Permission::EXECUTABLE) {
+        flags |= PteFlags::XD;
+    }
+    
+    flags
+}
+
+fn permission_to_pde_flags(perm: Permission) -> PdeFlags {
+    let mut flags = PdeFlags::P; // Always present
+    
+    if perm.contains(Permission::WRITE) {
+        flags |= PdeFlags::RW;
+    }
+    if perm.contains(Permission::USER) {
+        flags |= PdeFlags::US;
+    }
+    if !perm.contains(Permission::EXECUTABLE) {
+        flags |= PdeFlags::XD;
+    }
+    
+    flags
+}
+
+fn permission_to_pdpe_flags(perm: Permission) -> PdpeFlags {
+    let mut flags = PdpeFlags::P; // Always present
+    
+    if perm.contains(Permission::WRITE) {
+        flags |= PdpeFlags::RW;
+    }
+    if perm.contains(Permission::USER) {
+        flags |= PdpeFlags::US;
+    }
+    if !perm.contains(Permission::EXECUTABLE) {
+        flags |= PdpeFlags::XD;
+    }
+    
+    flags
+}
+
+fn permission_to_pml4e_flags(perm: Permission) -> Pml4eFlags {
+    let mut flags = Pml4eFlags::P; // Always present
+    
+    if perm.contains(Permission::WRITE) {
+        flags |= Pml4eFlags::RW;
+    }
+    if perm.contains(Permission::USER) {
+        flags |= Pml4eFlags::US;
+    }
+    if !perm.contains(Permission::EXECUTABLE) {
+        flags |= Pml4eFlags::XD;
+    }
+    
+    flags
+}
+
 /// Represents page table indices for a given virtual address (VA).
 ///
 /// In the x86_64 architecture, virtual addresses are translated to physical
@@ -183,12 +248,13 @@ impl PtIndices {
     /// - `Err(PageTableMappingError::Unaligned)`: If `va` is not page-aligned.
     pub fn from_va(va: Va) -> Result<Self, PageTableMappingError> {
         if va.into_usize() & 0xFFF == 0 {
+            let addr = va.into_usize();
             Ok(Self {
                 va,
-                pml4ei: todo!(),
-                pdptei: todo!(),
-                pdei: todo!(),
-                ptei: todo!(),
+                pml4ei: (addr >> 39) & 0x1FF,  // bits 47-39
+                pdptei: (addr >> 30) & 0x1FF,  // bits 38-30
+                pdei: (addr >> 21) & 0x1FF,    // bits 29-21
+                ptei: (addr >> 12) & 0x1FF,    // bits 20-12
             })
         } else {
             Err(PageTableMappingError::Unaligned)
@@ -288,8 +354,74 @@ impl PageTable {
         perm: Permission,
     ) -> Result<(), PageTableMappingError> {
         let indices = PtIndices::from_va(va)?;
-        // Hint: Use `Page::new()` to allocate tables.
-        todo!()
+
+        if indices.pml4ei >= PageTableRoot::KBASE {return Err(PageTableMappingError::InvalidPermission)}
+        
+        // Check for invalid permissions
+        if perm.is_empty() || perm == Permission::USER {
+            return Err(PageTableMappingError::InvalidPermission);
+        }
+
+        // Get or create PML4 entry
+        let pml4e = &mut self.0[indices.pml4ei];
+        let pdp = if let Ok(pdp) = pml4e.into_pdp_mut() {
+            pdp
+        }
+        else {
+            // Create new PDP
+            let new_pdp_page = Page::new();
+            let new_pdp_pa = new_pdp_page.into_raw();
+            // pml4e.set_pa(new_pdp_pa)?.set_flags(permission_to_pml4e_flags(perm));
+            pml4e.set_pa(new_pdp_pa)?;
+            pml4e.set_flags(permission_to_pml4e_flags(perm));
+            pml4e.into_pdp_mut()?
+            // unsafe {
+            //     core::slice::from_raw_parts_mut(
+            //         new_pdp_pa.into_kva().into_usize() as *mut Pdpe,
+            //         512,
+            //     )
+            // }
+        };
+
+        // Get or create PD entry
+        let pdpe = &mut pdp[indices.pdptei];
+        let pd = if let Ok(pd) = pdpe.into_pd_mut() {
+            // PD already exists, get it
+            pd
+        } else {
+            // Create new PD
+            let new_pd_page = Page::new();
+            let new_pd_pa = new_pd_page.into_raw();
+            pdpe.set_pa(new_pd_pa)?;
+            pdpe.set_flags(permission_to_pdpe_flags(perm));
+            pdpe.into_pd_mut()?
+        };
+
+        // Get or create PT entry
+        let pde = &mut pd[indices.pdei];
+        let pt = if let Ok(pt) = pde.into_pt_mut() {
+            // PT already exists, get it
+            pt
+        } else {
+            // Create new PT
+            let new_pt_page = Page::new();
+            let new_pt_pa = new_pt_page.into_raw();
+            pde.set_pa(new_pt_pa)?;
+            pde.set_flags(permission_to_pde_flags(perm));
+            pde.into_pt_mut()?
+        };
+
+        // Set the final PTE
+        let pte = &mut pt[indices.ptei];
+        if pte.flags().contains(PteFlags::P) {
+            return Err(PageTableMappingError::Duplicated);
+        }
+        unsafe { 
+            pte.set_pa(pa)?;
+            pte.set_flags(permission_to_pte_flags(perm)); 
+        }
+
+        Ok(())
     }
 
     /// Unmap the given virtual address (`va`) and return the physical page that
@@ -308,9 +440,17 @@ impl PageTable {
     /// fails (e.g., the virtual address was not previously mapped).
     pub fn unmap(&mut self, va: Va) -> Result<Page, PageTableMappingError> {
         let indices = PtIndices::from_va(va)?;
-        // Hint: Use `Page::from_pa()`.
-        let pa = todo!();
-        Ok(StaleTLBEntry::new(va, unsafe { Page::from_pa(pa) }).invalidate())
+
+        // Walk through the page table to find the PTE
+
+        let walked = self.walk_mut(va)?;
+        let pte = walked.pte;
+        
+        // Clear the PTE
+        unsafe { 
+            let pa = pte.clear().ok_or(PageTableMappingError::NotExist)?; 
+            Ok(Page::from_pa(pa))
+        }
     }
 
     /// Walk through the page table to find reference to the corresponding page
@@ -330,7 +470,55 @@ impl PageTable {
     /// does not exist (e.g., if the address is not mapped).
     pub fn walk(&self, va: Va) -> Result<&Pte, PageTableMappingError> {
         let indices = PtIndices::from_va(va)?;
-        todo!()
+
+        let pml4e = &self.0[indices.pml4ei];
+        let pdpt = pml4e.into_pdp()?;
+        let pdpe = &pdpt[indices.pdptei];
+        let pdet = pdpe.into_pd()?;
+        let pde = &pdet[indices.pdei];
+        let pt = pde.into_pt()?;
+        let pte = &pt[indices.ptei];
+        if pte.flags().contains(PteFlags::P) {
+            Ok(pte)
+        }
+        else {
+            Err(PageTableMappingError::NotExist)
+        }
+
+        // // Walk through the page table to find the PTE
+        // let pml4e = &self.0[indices.pml4ei];
+        // let pdp_pa = pml4e.pa().ok_or(PageTableMappingError::NotExist)?;
+        // let pdp = unsafe {
+        //     core::slice::from_raw_parts(
+        //         pdp_pa.into_kva().into_usize() as *const Pdpe,
+        //         512,
+        //     )
+        // };
+
+        // let pde = &pdp[indices.pdptei];
+        // let pd_pa = pde.pa().ok_or(PageTableMappingError::NotExist)?;
+        // let pd = unsafe {
+        //     core::slice::from_raw_parts(
+        //         pd_pa.into_kva().into_usize() as *const Pde,
+        //         512,
+        //     )
+        // };
+
+        // let pte = &pd[indices.pdei];
+        // let pt_pa = pte.pa().ok_or(PageTableMappingError::NotExist)?;
+        // let pt = unsafe {
+        //     core::slice::from_raw_parts(
+        //         pt_pa.into_kva().into_usize() as *const Pte,
+        //         512,
+        //     )
+        // };
+
+        // let final_pte = &pt[indices.ptei];
+        // if !final_pte.flags().contains(PteFlags::P) {
+        //     return Err(PageTableMappingError::NotExist);
+        // }
+        
+        // Ok(final_pte)
     }
 
     /// Walk through the page table to find mutable reference for the
@@ -351,7 +539,53 @@ impl PageTable {
     /// does not exist (e.g., if the address is not mapped).
     pub fn walk_mut(&mut self, va: Va) -> Result<Walked<'_>, PageTableMappingError> {
         let indices = PtIndices::from_va(va)?;
-        todo!()
+
+        let pml4e = &mut self.0[indices.pml4ei];
+        let pdpt = pml4e.into_pdp_mut()?;
+        let pdpe = &mut pdpt[indices.pdptei];
+        let pdet = pdpe.into_pd_mut()?;
+        let pde = &mut pdet[indices.pdei];
+        let pt = pde.into_pt_mut()?;
+        let pte = &mut pt[indices.ptei];
+        Ok(Walked {addr: va, pte: pte})
+
+        // // Walk through the page table to find the PTE
+        // let pml4e = &mut self.0[indices.pml4ei];
+        // let pdp_pa = pml4e.pa().ok_or(PageTableMappingError::NotExist)?;
+        // let pdp = unsafe {
+        //     core::slice::from_raw_parts_mut(
+        //         pdp_pa.into_kva().into_usize() as *mut Pdpe,
+        //         512,
+        //     )
+        // };
+
+        // let pde = &mut pdp[indices.pdptei];
+        // let pd_pa = pde.pa().ok_or(PageTableMappingError::NotExist)?;
+        // let pd = unsafe {
+        //     core::slice::from_raw_parts_mut(
+        //         pd_pa.into_kva().into_usize() as *mut Pde,
+        //         512,
+        //     )
+        // };
+
+        // let pte = &mut pd[indices.pdei];
+        // let pt_pa = pte.pa().ok_or(PageTableMappingError::NotExist)?;
+        // let pt = unsafe {
+        //     core::slice::from_raw_parts_mut(
+        //         pt_pa.into_kva().into_usize() as *mut Pte,
+        //         512,
+        //     )
+        // };
+
+        // let final_pte = &mut pt[indices.ptei];
+        // if !final_pte.flags().contains(PteFlags::P) {
+        //     return Err(PageTableMappingError::NotExist);
+        // }
+        
+        // Ok(Walked {
+        //     addr: va,
+        //     pte: final_pte,
+        // })
     }
 
     /// Clears all entries from the page table and deallocates associated pages.
@@ -375,11 +609,55 @@ impl PageTable {
     /// - Calling this on a live page table (e.g., the currently active one) may
     ///   result in undefined behavior.
     fn clear(&mut self) {
-        // TODO: Clear the page table.
-        // You must clear the mid-level table.
-        // You don't need to care about pml4i indices larger than
-        // [`PageTableRoot::KBASE`].
-        todo!()
+        // Clear all user pages (indices < KBASE)
+        for pml4i in 0..PageTableRoot::KBASE {
+            let pml4e = &mut self.0[pml4i];
+            if let Some(pdp_pa) = pml4e.pa() {
+                if let Ok(pdp) = pml4e.into_pdp_mut() {
+                    // Clear the PDP
+                    for pdptei in 0..512 {
+                        let pdpe = &mut pdp[pdptei];
+                        if let Some(pd_pa) = pdpe.pa() {
+                            if let Ok(pd) = pdpe.into_pd_mut() {
+                                // Clear the PD
+                                for pdei in 0..512 {
+                                    let pde = &mut pd[pdei];
+                                    if let Some(pt_pa) = pde.pa() {
+                                        if let Ok(pt) = pde.into_pt_mut() {
+                                            // Clear the PT                                
+                                            for ptei in 0..512 {
+                                                let pte = &mut pt[ptei];
+                                                if let Some(page_pa) = pte.pa() {
+                                                    // Deallocate the page
+                                                    let _page = unsafe { Page::from_pa(page_pa) };
+                                                    // Page will be deallocated when dropped
+                                                }
+                                                unsafe { pte.clear(); }
+                                            }
+                                            
+                                            // Deallocate the PT
+                                            let _pt_page = unsafe { Page::from_pa(pt_pa) };
+                                            // Page will be deallocated when dropped
+                                        }
+                                    }
+                                    pde.clear();
+                                }
+                                
+                                // Deallocate the PD
+                                let _pd_page = unsafe { Page::from_pa(pd_pa) };
+                                // Page will be deallocated when dropped
+                            }
+                        }
+                        pdpe.clear();
+                    }
+                    
+                    // Deallocate the PDP
+                    let _pdp_page = unsafe { Page::from_pa(pdp_pa) };
+                    // Page will be deallocated when dropped
+                }
+            }
+            pml4e.clear();
+        }
     }
 }
 

@@ -49,14 +49,32 @@
 //! functionalities to load user program in the next [`section`].
 //!
 //! [`section`]: crate::loader
-use crate::{page_table::PageTable, pager::Pager};
+
+use crate::{page_table::{PageTable, PtIndices}, pager::Pager};
 use alloc::collections::btree_map::BTreeMap;
 use keos::{
-    KernelError,
-    addressing::Va,
-    fs::RegularFile,
-    mm::{PageRef, page_table::Permission},
+    addressing::Va, fs::{FileBlockNumber, RegularFile}, mm::{page_table::{PageTableRoot, Permission, PteFlags}, Page, PageRef}, KernelError
 };
+
+fn pte_flags_to_permission(flags: PteFlags) -> Permission {
+    let mut perm = Permission::empty(); // Always present
+    
+    if flags.contains(PteFlags::RW) {
+        perm |= Permission::WRITE;
+        perm |= Permission::READ;
+    }
+    if flags.contains(PteFlags::R) {
+        perm |= Permission::READ;
+    }
+    if flags.contains(PteFlags::US) {
+        perm |= Permission::USER;
+    }
+    if !flags.contains(PteFlags::XD) {
+        perm |= Permission::EXECUTABLE;
+    }
+    
+    perm
+}
 
 /// Represent a mapping of contiguous memory.
 pub struct Mapping {
@@ -95,7 +113,49 @@ impl Pager for EagerPager {
         file: Option<&RegularFile>,
         offset: usize,
     ) -> Result<usize, KernelError> {
-        todo!()
+
+        if (addr.into_usize() == 0) | 
+            (((addr.into_usize() >> 39) & 0x1FF) >= PageTableRoot::KBASE) | 
+            (((addr.into_usize()+size >> 39) & 0x1FF) >= PageTableRoot::KBASE) | 
+            ((addr.into_usize() & 0xFFF != 0)) {
+            return Err(KernelError::InvalidArgument)
+        }
+        // }
+
+        let end_addr = addr.into_usize() + size;
+
+        let mut va = addr;
+        if let Some(regular_file) = file {
+            let mut fba = FileBlockNumber::from_offset(offset);
+            while va.into_usize() < end_addr {
+                let pg = regular_file.mmap(fba)?;
+                if let Ok(()) =  page_table.map(va, pg, prot) {
+                    ()
+                }
+                else {
+                    return Err(KernelError::InvalidArgument)
+                }
+                va = Va::new(va.into_usize() + 0x1000).unwrap_or(addr);
+                fba = fba + 1;
+            }
+        }
+        else {
+            while va.into_usize() < (addr.into_usize() + size) {
+                let mut pg = Page::new();
+                pg.inner_mut().fill(0);
+                if let Ok(()) = page_table.map(va, pg, prot) {
+                    ()
+                }
+                else {
+                    return Err(KernelError::BadAddress)
+                }
+                va = Va::new(va.into_usize() + 0x1000).unwrap();
+            }
+        }
+
+        let mapping = Mapping { mapping_size: size, perm: prot};
+        self.mappings.insert(addr, mapping);
+        Ok(addr.into_usize())
     }
 
     /// Memory unmap function (`munmap`) for eager paging.
@@ -103,7 +163,18 @@ impl Pager for EagerPager {
     /// This function would unmap a previously mapped memory region, releasing
     /// any associated resources.
     fn munmap(&mut self, page_table: &mut PageTable, addr: Va) -> Result<usize, KernelError> {
-        todo!()
+        let mapping = self.mappings.remove(&addr).ok_or(KernelError::InvalidArgument)?;
+        let mapping_size = mapping.mapping_size;
+
+        let mut va = addr;
+        let end_addr = addr.into_usize() + mapping_size;
+        while va.into_usize() < end_addr {
+            if let Ok(page) = page_table.unmap(va) {
+                drop(page);
+            }
+            va = Va::new(va.into_usize() + 0x1000).unwrap();
+        }
+        Ok(mapping_size)
     }
 
     /// Find a mapped page at the given virtual address.
@@ -117,7 +188,25 @@ impl Pager for EagerPager {
         addr: Va,
     ) -> Option<(PageRef<'_>, Permission)> {
         // HINT: use `PageRef::from_pa`
-        todo!()
+        if let Ok(pte) = page_table.walk(addr) {
+            // println!("found pte");
+            let perm = pte_flags_to_permission(pte.flags());
+            if let Some(pa) = pte.pa() {
+                unsafe {
+                    let pg_ref = PageRef::from_pa(pa);
+                    // println!("found page");
+                    return Some((pg_ref, perm))
+                }
+            }
+            else {
+                // println!("found None");
+                return None
+            }
+        }
+        else {
+            // println!("found None2");
+            return None
+        }
     }
 
     /// Checks whether access to the given virtual address is permitted.
@@ -126,6 +215,18 @@ impl Pager for EagerPager {
     /// memory mapping and that the requested access type (read or write) is
     /// allowed by the page's protection flags.
     fn access_ok(&self, va: Va, is_write: bool) -> bool {
-        todo!()
+        if let Some((start_va, mapping)) = self.mappings.range(..=va).next_back() {
+            let end_addr = start_va.into_usize() + mapping.mapping_size;
+            if va.into_usize() < end_addr {
+                let perm = mapping.perm;
+                if is_write {
+                    return perm.contains(Permission::WRITE)
+                }
+                else {
+                    return perm.contains(Permission::READ)
+                }
+            }
+        }
+        false
     }
 }

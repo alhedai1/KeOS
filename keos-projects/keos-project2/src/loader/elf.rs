@@ -234,6 +234,15 @@ impl Phdr {
     /// - A `Permission` value representing the phdr's memory permissions.
     pub fn permission(&self) -> Permission {
         let mut permission = Permission::USER;
-        todo!()
+        if self.p_flags.contains(PFlags::WRITE) {
+            permission |= Permission::WRITE;
+        }
+        if self.p_flags.contains(PFlags::READ) {
+            permission |= Permission::READ;
+        }
+        if self.p_flags.contains(PFlags::EXECUTABLE) {
+            permission |= Permission::EXECUTABLE;
+        }
+        permission
     }
 }
