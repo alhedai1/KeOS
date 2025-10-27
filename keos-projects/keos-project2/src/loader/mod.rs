@@ -191,70 +191,63 @@ impl<P: Pager> LoadContext<P> {
     /// - Applies appropriate memory permissions using [`Phdr::permission`].
     /// - Ensures proper alignment and memory allocation before mapping.
     pub fn load_phdr(&mut self, elf: Elf) -> Result<(), KernelError> {
-        let mut bss = Va::new(0).unwrap();
-
         for phdr in elf.phdrs().map_err(|_| KernelError::InvalidArgument)? {
             if phdr.type_ == PType::Load {
-                let (vaddr, memsz, filesz, fileofs, perm): (Va, _, _, _, _) =
-                    (Va::new(phdr.p_vaddr as usize).unwrap(), phdr.p_memsz as usize, phdr.p_filesz as usize, phdr.p_offset as usize, phdr.permission());
-                bss = bss.max(vaddr + filesz as usize);
+                let (vaddr, memsz, filesz, fileofs, perm): (Va, _, _, _, _) = (
+                    Va::new(phdr.p_vaddr as usize).unwrap(),
+                    phdr.p_memsz as usize,
+                    phdr.p_filesz as usize,
+                    phdr.p_offset as usize,
+                    phdr.permission(),
+                );
 
-                // insufficient memory
-                if memsz < filesz {return Err(KernelError::InvalidArgument)}
+                // 1. ERROR CHECKS
+                if memsz < filesz {
+                    return Err(KernelError::InvalidArgument);
+                }
 
-                // conflict with mapped memory
                 let mut tmp = vaddr;
-                    while tmp.into_usize() < (vaddr.into_usize() + (memsz as usize)) {
+                while tmp.into_usize() < (vaddr.into_usize() + (memsz as usize)) {
                     if let Ok(pte) = self.mm_struct.page_table.walk(tmp) {
-                            if pte.flags().contains(page_table::PteFlags::P) {return Err(KernelError::InvalidArgument)}
+                        if pte.flags().contains(page_table::PteFlags::P) {
+                            return Err(KernelError::InvalidArgument);
+                        }
                     }
                     tmp = Va::new(tmp.into_usize() + 0x1000)
                         .ok_or(KernelError::InvalidArgument)?;
                 }
 
-                // align vaddr and fileofs
+                // 2. MAP FILE-BACKED PAGES
                 let page_offset = vaddr.into_usize() & 0xFFF;
                 let aligned_vaddr = Va::new(vaddr.into_usize() - page_offset).unwrap();
                 let aligned_fileofs = fileofs - page_offset;
 
-                // calculate end addresses
                 let file_end = vaddr.into_usize() + filesz;
                 let aligned_file_end = align_up(file_end, 0x1000);
-                let mem_end = vaddr.into_usize() + memsz;
 
-                // let aligned_memsz = memsz + page_offset;
-                // let mut mem_end = vaddr.into_usize() + memsz;
-                // mem_end = (mem_end + 0xFFF) & !0xFFF;
-                // let aligned_filesz = filesz + page_offset;
-                
-                // copy from file into region [vaddr..bss]
                 let map_filesz = aligned_file_end - aligned_vaddr.into_usize();
                 if map_filesz > 0 {
-                    self.mm_struct.do_mmap(aligned_vaddr, map_filesz, perm, Some(elf.file), aligned_fileofs)?;
+                    self.mm_struct.do_mmap(
+                        aligned_vaddr,
+                        map_filesz,
+                        perm,
+                        Some(elf.file),
+                        aligned_fileofs,
+                    )?;
                 }
 
-                // let bss_start = file_end;
-                // let first_bss_page = align_up(bss_start, 0x1000);
-                // let aligned_mem_end = align_up(mem_end, 0x1000);
-
-                // if aligned_mem_end > first_bss_page {
-                //     let bss_pages = aligned_mem_end - first_bss_page;
-                //     self.mm_struct.do_mmap(Va::new(first_bss_page).unwrap(), bss_pages, perm, None, 0)?;
-                // }
-
                 // 3. ZERO OUT PARTIAL BSS
-                // The BSS section might start in the middle of the last file-backed page.
-                // We need to zero out the remainder of that page.
                 let bss_start_offset_in_page = file_end & 0xFFF;
                 if bss_start_offset_in_page != 0 {
-                    // We are in a partial page.
                     let va_of_partial_page = Va::new(align_down(file_end, 0x1000)).unwrap();
                     let mem_end_in_page = (vaddr.into_usize() + memsz).min(aligned_file_end);
-                    let bss_end_offset_in_page = mem_end_in_page & 0xFFF;
                     
-                    // If bss_end_offset_in_page is 0, it means the BSS ends exactly at the page boundary,
-                    // so we zero to the end (0x1000).
-                    let zero_end = if bss_end_offset_in_page == 0 { 0x1000 } else { bss_end_offset_in_page };
+                    let bss_end_offset_in_page = mem_end_in_page & 0xFFF;
+                    let zero_end = if bss_end_offset_in_page == 0 && mem_end_in_page > va_of_partial_page.into_usize() {
+                        0x1000 
+                    } else { 
+                        bss_end_offset_in_page 
+                    };
 
                     if zero_end > bss_start_offset_in_page {
                         self.mm_struct
@@ -265,7 +258,6 @@ impl<P: Pager> LoadContext<P> {
                 }
 
                 // 4. MAP ANONYMOUS BSS PAGES
-                // Map any remaining full pages for BSS as anonymous, zero-filled memory.
                 let mem_end_addr = vaddr.into_usize() + memsz;
                 let aligned_mem_end = align_up(mem_end_addr, 0x1000);
 
@@ -274,33 +266,13 @@ impl<P: Pager> LoadContext<P> {
                     self.mm_struct.do_mmap(
                         Va::new(aligned_file_end).unwrap(),
                         bss_map_size,
-                        perm, // BSS pages need WRITE permission
-                        None, // `None` = anonymous mapping
+                        perm | page_table::Permission::WRITE, // BSS must be writable
+                        None,
                         0,
                     )?;
                 }
-
-                // if bss.into_usize() & PAGE_MASK != 0 {
-                //     self.mm_struct
-                //         .get_user_page_and(bss, |mut page, _| {
-                //             page.inner_mut()[bss.into_usize() & PAGE_MASK..].fill(0);
-                //         })?;
-                //         // .unwrap();
-                // }
             }
-            }
-    
-        // println!("hello3");
-        // println!("{}", );
-
-        // // if bss not aligned with page, fill with zeros
-        // if bss.into_usize() & PAGE_MASK != 0 {
-        //     self.mm_struct
-        //         .get_user_page_and(bss, |mut page, _| {
-        //             page.inner_mut()[bss.into_usize() & PAGE_MASK..].fill(0);
-        //         })?;
-        //         // .unwrap();
-        // }
+        }
         Ok(())
     }
     
@@ -339,18 +311,21 @@ impl<P: Pager> LoadContext<P> {
         } = self;
         let mut builder = StackBuilder::new(mm_state)?;
 
-        // Push argument strings in reverse order (last argument first)
+        // Push argument strings and collect their addresses
+        // We push in reverse order to match the diagram's addresses
         let mut arg_addrs = Vec::new();
         for &arg in arguments.iter().rev() {
             let addr = builder.push_str(arg);
             arg_addrs.push(addr);
         }
-        arg_addrs.reverse(); // Now arg_addrs[0] is the first argument
+        // `arg_addrs` now has pointers in reverse order: [addr_bar, addr_foo, ...]
+        arg_addrs.reverse();
+        // `arg_addrs` is now correct: [addr_ls, addr_l, ...]
 
         // Align stack to 8-byte boundary
         builder.align(8);
 
-        // Push null terminator for argv array
+        // Push null terminator for argv array (argv[argc] = NULL)
         builder.push_usize(0);
 
         // Push argv pointers in reverse order (argv[argc-1] first)
@@ -365,9 +340,15 @@ impl<P: Pager> LoadContext<P> {
         builder.push_usize(0);
 
         // Set up registers
-        *regs.rsp() = builder.sp().into_usize();
-        regs.gprs.rdi = arguments.len();
-        regs.gprs.rsi = argv_ptr;
+        *regs.rsp() = builder.sp().into_usize(); // rsp points to the fake return address
+        regs.gprs.rdi = arguments.len(); // rdi = argc
+        regs.gprs.rsi = argv_ptr; // rsi = argv
+
+        // DEBUG: Print final registers
+        println!("[build_stack] FINAL REGISTERS:"); // DEBUG
+        println!("  -> rsp (stack ptr):   0x{:x}", regs.rsp()); // DEBUG
+        println!("  -> rdi (argc):        {}", regs.gprs.rdi); // DEBUG
+        println!("  -> rsi (argv ptr):  0x{:x}", regs.gprs.rsi); // DEBUG
 
         Ok(())
     }

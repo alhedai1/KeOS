@@ -101,38 +101,38 @@ impl<'a, P: Pager> StackBuilder<'a, P> {
     ///
     /// # Returns
     /// - The updated stack pointer after pushing the value.
-// In stack_builder.rs
-pub fn push_bytes(&mut self, mut bytes: &[u8]) -> Va {
-    let start_addr = self.sp - bytes.len();
-    self.sp = start_addr;
-    let mut current_addr = start_addr;
-    
-    // Loop until all bytes are written
-    while !bytes.is_empty() {
-        let page_offset = current_addr.into_usize() & 0xFFF;
-        let space_in_page = 0x1000 - page_offset;
-        let bytes_to_write_len = bytes.len().min(space_in_page);
+    // In stack_builder.rs
+    pub fn push_bytes(&mut self, mut bytes: &[u8]) -> Va {
+        let start_addr = self.sp - bytes.len();
+        self.sp = start_addr;
+        let mut current_addr = start_addr;
+        
+        // Loop until all bytes are written
+        while !bytes.is_empty() {
+            let page_offset = current_addr.into_usize() & 0xFFF;
+            let space_in_page = 0x1000 - page_offset;
+            let bytes_to_write_len = bytes.len().min(space_in_page);
 
-        // Get the chunk of data to write in this page
-        let (data_chunk, remaining_data) = bytes.split_at(bytes_to_write_len);
+            // Get the chunk of data to write in this page
+            let (data_chunk, remaining_data) = bytes.split_at(bytes_to_write_len);
 
-        // Get the page and copy the chunk
-        let aligned_current_addr = current_addr & !0xFFF;
-        self.mm_state
-            .get_user_page_and(aligned_current_addr, |mut page, _| {
-                let page_slice =
-                    &mut page.inner_mut()[page_offset..page_offset + bytes_to_write_len];
-                page_slice.copy_from_slice(data_chunk);
-            })
-            .expect("Failed to get user page while building stack");
+            // Get the page and copy the chunk
+            let aligned_current_addr = current_addr & !0xFFF;
+            self.mm_state
+                .get_user_page_and(aligned_current_addr, |mut page, _| {
+                    let page_slice =
+                        &mut page.inner_mut()[page_offset..page_offset + bytes_to_write_len];
+                    page_slice.copy_from_slice(data_chunk);
+                })
+                .expect("Failed to get user page while building stack");
 
-        // Advance to the next chunk
-        bytes = remaining_data;
-        current_addr += bytes_to_write_len;
+            // Advance to the next chunk
+            bytes = remaining_data;
+            current_addr += bytes_to_write_len;
+        }
+
+        start_addr // Return the starting address
     }
-
-    start_addr // Return the starting address
-}
 
     /// Pushes a `usize` value onto the stack.
     ///
@@ -169,8 +169,8 @@ pub fn push_bytes(&mut self, mut bytes: &[u8]) -> Va {
     #[inline]
     pub fn push_str(&mut self, s: &str) -> Va {
         // Make a space for null bytes ('\0').
-        // self.sp -= 1;
-        self.push_bytes(b"\0");
+        self.sp -= 1;
+        // self.push_bytes(b"\0");
         // Push the string slice.
         self.push_bytes(s.as_bytes())
     }
