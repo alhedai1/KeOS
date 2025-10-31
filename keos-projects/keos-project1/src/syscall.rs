@@ -161,7 +161,16 @@ impl<'a> SyscallAbi<'a> {
     /// number and arguments extracted from the provided registers.
     ///
     pub fn from_registers(regs: &'a mut Registers) -> Self {
-        SyscallAbi { sysno: regs.gprs.rax, arg1: regs.gprs.rdi, arg2: regs.gprs.rsi, arg3: regs.gprs.rdx, arg4: regs.gprs.r10, arg5: regs.gprs.r8, arg6: regs.gprs.r9, regs: regs }
+        SyscallAbi {
+            sysno: regs.gprs.rax,
+            arg1: regs.gprs.rdi,
+            arg2: regs.gprs.rsi,
+            arg3: regs.gprs.rdx,
+            arg4: regs.gprs.r10,
+            arg5: regs.gprs.r8,
+            arg6: regs.gprs.r9,
+            regs: regs,
+        }
     }
 
     /// Sets the return value for the system call.

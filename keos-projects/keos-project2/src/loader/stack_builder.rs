@@ -106,7 +106,7 @@ impl<'a, P: Pager> StackBuilder<'a, P> {
         let start_addr = self.sp - bytes.len();
         self.sp = start_addr;
         let mut current_addr = start_addr;
-        
+
         // Loop until all bytes are written
         while !bytes.is_empty() {
             let page_offset = current_addr.into_usize() & 0xFFF;

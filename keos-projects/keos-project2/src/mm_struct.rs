@@ -92,9 +92,15 @@
 use crate::{page_table::PageTable, pager::Pager};
 use core::ops::Range;
 use keos::{
-    addressing::Va, fs::RegularFile, mm::{page_table::{Permission, PteFlags}, Page, PageRef}, KernelError
+    KernelError,
+    addressing::Va,
+    fs::RegularFile,
+    mm::{PageRef, page_table::{Permission, PteFlags}},
 };
-use keos_project1::{file_struct::{FileDescriptor, FileKind, FileStruct}, syscall::SyscallAbi};
+use keos_project1::{
+    file_struct::{FileDescriptor, FileKind, FileStruct},
+    syscall::SyscallAbi,
+};
 
 /// The [`MmStruct`] represents the memory state for a specific process,
 /// corresponding to the Linux kernel's `struct mm_struct`.
@@ -173,7 +179,7 @@ impl<P: Pager> MmStruct<P> {
             }
             va += 1;
         }
-        return true
+        return true;
     }
 
     /// Wrapper function for the pager's `mmap` method. It delegates the actual
@@ -261,7 +267,7 @@ impl<P: Pager> MmStruct<P> {
 
         // check addr is non-zero and page-aligned
         if (addr == 0) || (addr & 0xFFF != 0) {
-            return Err(KernelError::InvalidArgument)
+            return Err(KernelError::InvalidArgument);
         }
 
         // check length is non-zero
@@ -271,18 +277,15 @@ impl<P: Pager> MmStruct<P> {
 
         // check fd is RegularFile or anonymous
         let file = if let Some(file) = fstate.files.get(&fd) {
-            if let FileKind::RegularFile{file, position} = &file.file {
+            if let FileKind::RegularFile { file, position } = &file.file {
                 Some(file)
+            } else {
+                return Err(KernelError::InvalidArgument);
             }
-            else {
-                return Err(KernelError::InvalidArgument)
-            }
-        }
-        else {
+        } else {
             if fd.0 != -1 {
-                return Err(KernelError::InvalidArgument)
-            }
-            else {
+                return Err(KernelError::InvalidArgument);
+            } else {
                 None
             }
         };
@@ -291,13 +294,16 @@ impl<P: Pager> MmStruct<P> {
         let mut va = Va::new(addr).ok_or(KernelError::InvalidArgument)?;
         while va.into_usize() < (addr + length) {
             if let Ok(pte) = self.page_table.walk(va) {
-                if pte.flags().contains(PteFlags::P) {return Err(KernelError::InvalidArgument)}
+                if pte.flags().contains(PteFlags::P) {
+                    return Err(KernelError::InvalidArgument);
+                }
             }
             va += 1;
         }
 
         let va = Va::new(addr).ok_or(KernelError::InvalidArgument)?;
-        let perm = Permission::from_bits(prot).ok_or(KernelError::InvalidArgument)?;
+        let mut perm = Permission::from_bits(prot).ok_or(KernelError::InvalidArgument)?;
+        perm |= Permission::USER;
 
         self.do_mmap(va, length, perm, file, offset)?;
         Ok(addr)
@@ -350,11 +356,10 @@ impl<P: Pager> MmStruct<P> {
         let va = Va::new(addr).ok_or(KernelError::InvalidArgument)?;
         if let Ok(pte) = self.page_table.walk(va) {
             if !pte.flags().contains(PteFlags::P) {
-                return Err(KernelError::InvalidArgument)
+                return Err(KernelError::InvalidArgument);
             }
-        }
-        else {
-            return Err(KernelError::InvalidArgument)
+        } else {
+            return Err(KernelError::InvalidArgument);
         }
 
         self.pager.munmap(&mut self.page_table, va)?;

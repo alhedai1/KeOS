@@ -50,15 +50,21 @@
 //!
 //! [`section`]: crate::loader
 
-use crate::{page_table::{PageTable, PtIndices}, pager::Pager};
+use crate::{page_table::PageTable, pager::Pager};
 use alloc::collections::btree_map::BTreeMap;
 use keos::{
-    addressing::Va, fs::{FileBlockNumber, RegularFile}, mm::{page_table::{PageTableRoot, Permission, PteFlags}, Page, PageRef}, KernelError
+    KernelError,
+    addressing::Va,
+    fs::{FileBlockNumber, RegularFile},
+    mm::{
+        Page, PageRef,
+        page_table::{PageTableRoot, Permission, PteFlags},
+    },
 };
 
 fn pte_flags_to_permission(flags: PteFlags) -> Permission {
     let mut perm = Permission::empty(); // Always present
-    
+
     if flags.contains(PteFlags::RW) {
         perm |= Permission::WRITE;
         perm |= Permission::READ;
@@ -72,7 +78,7 @@ fn pte_flags_to_permission(flags: PteFlags) -> Permission {
     if !flags.contains(PteFlags::XD) {
         perm |= Permission::EXECUTABLE;
     }
-    
+
     perm
 }
 
@@ -113,12 +119,12 @@ impl Pager for EagerPager {
         file: Option<&RegularFile>,
         offset: usize,
     ) -> Result<usize, KernelError> {
-
-        if (addr.into_usize() == 0) | 
-            (((addr.into_usize() >> 39) & 0x1FF) >= PageTableRoot::KBASE) | 
-            (((addr.into_usize()+size >> 39) & 0x1FF) >= PageTableRoot::KBASE) | 
-            ((addr.into_usize() & 0xFFF != 0)) {
-            return Err(KernelError::InvalidArgument)
+        if (addr.into_usize() == 0)
+            | (((addr.into_usize() >> 39) & 0x1FF) >= PageTableRoot::KBASE)
+            | (((addr.into_usize() + size >> 39) & 0x1FF) >= PageTableRoot::KBASE)
+            | (addr.into_usize() & 0xFFF != 0)
+        {
+            return Err(KernelError::InvalidArgument);
         }
         // }
 
@@ -129,31 +135,31 @@ impl Pager for EagerPager {
             let mut fba = FileBlockNumber::from_offset(offset);
             while va.into_usize() < end_addr {
                 let pg = regular_file.mmap(fba)?;
-                if let Ok(()) =  page_table.map(va, pg, prot) {
+                if let Ok(()) = page_table.map(va, pg, prot) {
                     ()
-                }
-                else {
-                    return Err(KernelError::InvalidArgument)
+                } else {
+                    return Err(KernelError::InvalidArgument);
                 }
                 va = Va::new(va.into_usize() + 0x1000).unwrap_or(addr);
                 fba = fba + 1;
             }
-        }
-        else {
+        } else {
             while va.into_usize() < (addr.into_usize() + size) {
                 let mut pg = Page::new();
                 pg.inner_mut().fill(0);
                 if let Ok(()) = page_table.map(va, pg, prot) {
                     ()
-                }
-                else {
-                    return Err(KernelError::BadAddress)
+                } else {
+                    return Err(KernelError::BadAddress);
                 }
                 va = Va::new(va.into_usize() + 0x1000).unwrap();
             }
         }
 
-        let mapping = Mapping { mapping_size: size, perm: prot};
+        let mapping = Mapping {
+            mapping_size: size,
+            perm: prot,
+        };
         self.mappings.insert(addr, mapping);
         Ok(addr.into_usize())
     }
@@ -163,7 +169,10 @@ impl Pager for EagerPager {
     /// This function would unmap a previously mapped memory region, releasing
     /// any associated resources.
     fn munmap(&mut self, page_table: &mut PageTable, addr: Va) -> Result<usize, KernelError> {
-        let mapping = self.mappings.remove(&addr).ok_or(KernelError::InvalidArgument)?;
+        let mapping = self
+            .mappings
+            .remove(&addr)
+            .ok_or(KernelError::InvalidArgument)?;
         let mapping_size = mapping.mapping_size;
 
         let mut va = addr;
@@ -195,17 +204,15 @@ impl Pager for EagerPager {
                 unsafe {
                     let pg_ref = PageRef::from_pa(pa);
                     // println!("found page");
-                    return Some((pg_ref, perm))
+                    return Some((pg_ref, perm));
                 }
-            }
-            else {
+            } else {
                 // println!("found None");
-                return None
+                return None;
             }
-        }
-        else {
+        } else {
             // println!("found None2");
-            return None
+            return None;
         }
     }
 
@@ -220,10 +227,9 @@ impl Pager for EagerPager {
             if va.into_usize() < end_addr {
                 let perm = mapping.perm;
                 if is_write {
-                    return perm.contains(Permission::WRITE)
-                }
-                else {
-                    return perm.contains(Permission::READ)
+                    return perm.contains(Permission::WRITE);
+                } else {
+                    return perm.contains(Permission::READ);
                 }
             }
         }

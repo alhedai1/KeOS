@@ -172,11 +172,14 @@
 //! [`alloc::collections`]: <https://doc.rust-lang.org/alloc/collections/index.html>
 
 use crate::syscall::SyscallAbi;
-use alloc::{collections::BTreeMap, vec::Vec, vec};
-use keos::{
-    channel, fs::{Directory, RegularFile}, syscall::{flags::FileMode, uaccess}, teletype::Teletype, KernelError
-};
+use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::{cmp::min, u8};
+use keos::{
+    KernelError, channel,
+    fs::{Directory, RegularFile},
+    syscall::{flags::FileMode, uaccess},
+    teletype::Teletype,
+};
 #[cfg(doc)]
 use keos::{channel, teletype};
 
@@ -389,9 +392,8 @@ impl FileStruct {
     ///   available.
     pub fn install_file(&mut self, file: File) -> Result<FileDescriptor, KernelError> {
         if self.files.len() >= 1024 {
-            return Err(KernelError::TooManyOpenFile)
-        }
-        else {
+            return Err(KernelError::TooManyOpenFile);
+        } else {
             let num;
             // if there is at least 1 entry in fd table
             if let Some((key, _)) = self.files.last_key_value() {
@@ -419,7 +421,7 @@ impl FileStruct {
     /// - Returns [`KernelError::InvalidArgument`] if unexpected access mode
     ///   is provided.
     /// - Propagates any errors from underlying APIs (e.g. [`uaccess`](keos::syscall::uaccess)).
-    /// 
+    ///
     /// # Syscall API
     /// ```c
     /// int open(const char *pathname, int flags);
@@ -438,7 +440,7 @@ impl FileStruct {
             0 => FileMode::Read,
             1 => FileMode::Write,
             2 => FileMode::ReadWrite,
-            _ => return Err(KernelError::InvalidArgument)
+            _ => return Err(KernelError::InvalidArgument),
         };
 
         let pathname = uaccess::UserCString::new(pathname_ptr).read()?;
@@ -449,9 +451,15 @@ impl FileStruct {
         let file_tmp = file_inner.clone();
 
         let file_kind = if let Some(dir) = file_tmp.into_directory() {
-            FileKind::Directory { dir: dir, position: 0 }
+            FileKind::Directory {
+                dir: dir,
+                position: 0,
+            }
         } else {
-            FileKind::RegularFile { file: file_inner.into_regular_file().unwrap(), position: 0 }
+            FileKind::RegularFile {
+                file: file_inner.into_regular_file().unwrap(),
+                position: 0,
+            }
         };
 
         let file = File {
@@ -469,7 +477,7 @@ impl FileStruct {
     /// This function implements the system call for reading from an open file.
     /// It reads up to a specified number of bytes from the file and returns
     /// them to the user. The current file position is adjusted accordingly.
-    /// 
+    ///
     /// # Errors
     /// - Returns [`KernelError::IsDirectory`] if the specified file is a directory.
     /// - Returns [`KernelError::BrokenPipe`] if the specified file is a disconnected
@@ -492,11 +500,14 @@ impl FileStruct {
         let mut count = abi.arg3;
         let user_buf = uaccess::UserU8SliceWO::new(user_addr, count);
 
-        let file = self.files.get_mut(&fd).ok_or(KernelError::BadFileDescriptor)?;
+        let file = self
+            .files
+            .get_mut(&fd)
+            .ok_or(KernelError::BadFileDescriptor)?;
         if let FileMode::Write = file.mode {
-            return Err(KernelError::InvalidArgument)
+            return Err(KernelError::InvalidArgument);
         }
-        
+
         match &mut file.file {
             FileKind::Directory { dir, position } => return Err(KernelError::IsDirectory),
             FileKind::RegularFile { file, position } => {
@@ -504,7 +515,7 @@ impl FileStruct {
                 let mut buf = Vec::<u8>::new();
 
                 if *position > file.size() {
-                    return Ok(0)
+                    return Ok(0);
                 }
 
                 while total_read < count {
@@ -536,16 +547,15 @@ impl FileStruct {
                         Ok(byte) => {
                             buf[n] = byte;
                             n += 1;
-                        },
+                        }
                         Err(keos::channel::TryRecvError::Empty) => break,
                         Err(keos::channel::TryRecvError::Disconnected) => {
                             if n == 0 {
-                                return Err(KernelError::BrokenPipe)
-                            }
-                            else {
+                                return Err(KernelError::BrokenPipe);
+                            } else {
                                 break;
                             }
-                        },
+                        }
                     }
                 }
                 user_buf.put(&buf[..n])?;
@@ -553,7 +563,8 @@ impl FileStruct {
             }
             FileKind::Tx(tx) => return Err(KernelError::BrokenPipe),
 
-            FileKind::Stdio => { // Stdin   
+            FileKind::Stdio => {
+                // Stdin
                 if fd.0 == 0 {
                     let mut serial = keos::teletype::serial().lock();
                     let mut buf = vec![0u8; count];
@@ -562,12 +573,10 @@ impl FileStruct {
                     let n = res?;
                     user_buf.put(&buf[..n])?;
                     Ok(n)
+                } else {
+                    return Err(KernelError::InvalidArgument);
                 }
-                else {
-                    return Err(KernelError::InvalidArgument)
-                }
-            }
-            // _ => return Err(KernelError::BadFileDescriptor),
+            } // _ => return Err(KernelError::BadFileDescriptor),
         }
     }
 
@@ -600,9 +609,12 @@ impl FileStruct {
         let mut count = abi.arg3;
         let user_buf = uaccess::UserU8SliceRO::new(user_buf_addr, count);
 
-        let file = self.files.get_mut(&fd).ok_or(KernelError::BadFileDescriptor)?;
+        let file = self
+            .files
+            .get_mut(&fd)
+            .ok_or(KernelError::BadFileDescriptor)?;
         if let FileMode::Read = file.mode {
-            return Err(KernelError::InvalidArgument)
+            return Err(KernelError::InvalidArgument);
         }
 
         match &mut file.file {
@@ -625,22 +637,22 @@ impl FileStruct {
                 // self.files.get(&fd).unwrap().file.
                 Ok(total_written)
             }
-            FileKind::Stdio => { // Stdout, Stderr
+            FileKind::Stdio => {
+                // Stdout, Stderr
                 if fd.0 == 1 || fd.0 == 2 {
                     let mut buf = user_buf.get()?;
                     let mut serial = keos::teletype::serial().lock();
                     let n = serial.write(&mut buf);
                     serial.unlock();
                     n
+                } else {
+                    return Err(KernelError::InvalidArgument);
                 }
-                else {
-                    return Err(KernelError::InvalidArgument)
-                }
-            },
+            }
             FileKind::Rx(rx) => return Err(KernelError::BrokenPipe),
             FileKind::Tx(tx) => {
                 if !tx.can_send() {
-                    return Err(KernelError::BrokenPipe)
+                    return Err(KernelError::BrokenPipe);
                 }
 
                 if count > tx.capacity() {
@@ -652,13 +664,13 @@ impl FileStruct {
                     match tx.try_send(buf[n]) {
                         Ok(()) => {
                             n += 1;
-                        },
+                        }
                         Err(keos::channel::TrySendError::Full(val)) => break,
                         Err(keos::channel::TrySendError::Disconnected(val)) => break,
                     }
                 }
                 Ok(n)
-            },
+            }
         }
     }
 
@@ -676,7 +688,7 @@ impl FileStruct {
     /// - Returns [`KernelError::BadFileDescriptor`] if specified file descriptor is
     ///   invalid.
     /// - Propagates any errors from underlying APIs (e.g. [`uaccess`](keos::syscall::uaccess)).
-    /// 
+    ///
     /// # Syscall API
     /// ```c
     /// off_t seek(int fd, off_t offset, int whence);
@@ -695,15 +707,21 @@ impl FileStruct {
         let offset = abi.arg2 as i64;
         let whence = abi.arg3 as i32;
 
-        let file = self.files.get_mut(&fd).ok_or(KernelError::BadFileDescriptor)?;
+        let file = self
+            .files
+            .get_mut(&fd)
+            .ok_or(KernelError::BadFileDescriptor)?;
         if let FileKind::RegularFile { file, position } = &mut file.file {
             let current = *position as i64;
-            println!("position: {}, offset: {}, file size: {}", *position, offset, file.size());
+            println!(
+                "position: {}, offset: {}, file size: {}",
+                *position,
+                offset,
+                file.size()
+            );
             let calculated_position = match whence {
                 0 => offset,
-                1 => {
-                    current + offset
-                },
+                1 => current + offset,
                 2 => (file.size() as i64) + offset,
                 _ => return Err(KernelError::InvalidArgument),
             };
@@ -714,9 +732,8 @@ impl FileStruct {
             // }
             *position = calculated_position as usize;
             Ok(*position)
-        }   
-        else {
-            return Err(KernelError::InvalidArgument)
+        } else {
+            return Err(KernelError::InvalidArgument);
         }
     }
 
@@ -725,13 +742,13 @@ impl FileStruct {
     /// This function implements the system call for retrieving the current file
     /// pointer position. It allows the program to know where in the file
     /// the next operation will occur.
-    /// 
+    ///
     /// # Errors
     /// - Returns [`KernelError::InvalidArgument`] if the specified file is not a
     ///   [`FileKind::RegularFile`].
     /// - Returns [`KernelError::BadFileDescriptor`] if specified file descriptor is
     ///   invalid.
-    /// 
+    ///
     /// # Syscall API
     /// ```c
     /// off_t tell(int fd);
@@ -744,8 +761,7 @@ impl FileStruct {
         let file = self.files.get(&fd).ok_or(KernelError::BadFileDescriptor)?;
         if let FileKind::RegularFile { file, position } = &file.file {
             Ok(*position)
-        }
-        else {
+        } else {
             Err(KernelError::InvalidArgument)
         }
     }
@@ -753,11 +769,11 @@ impl FileStruct {
     /// Closes an open file.
     ///
     /// This function implements the system call for closing an open file.
-    /// 
+    ///
     /// # Errors
     /// - Returns [`KernelError::BadFileDescriptor`] if specified file descriptor is
     ///   invalid.
-    /// 
+    ///
     /// # Syscall API
     /// ```c
     /// int close(int fd);
@@ -767,7 +783,9 @@ impl FileStruct {
     /// Returns 0 if success.
     pub fn close(&mut self, abi: &SyscallAbi) -> Result<usize, KernelError> {
         let fd = FileDescriptor(abi.arg1 as i32);
-        self.files.remove(&fd).ok_or(KernelError::BadFileDescriptor)?;
+        self.files
+            .remove(&fd)
+            .ok_or(KernelError::BadFileDescriptor)?;
         Ok(0)
     }
 
@@ -799,11 +817,14 @@ impl FileStruct {
 
         let (tx, rx) = channel::channel(100);
 
-        let tx_file = File {mode: FileMode::Write, file: FileKind::Tx(tx)};
-        let rx_file = File {mode: FileMode::Read, file: FileKind::Rx(rx)};
-
-        let tx_fd = self.install_file(tx_file)?;
-        let rx_fd = self.install_file(rx_file)?;
+        let rx_fd = self.install_file(File {
+            mode: FileMode::Read,
+            file: FileKind::Rx(rx),
+        })?;
+        let tx_fd = self.install_file(File {
+            mode: FileMode::Write,
+            file: FileKind::Tx(tx),
+        })?;
 
         let fd_arr = [rx_fd.0, tx_fd.0];
 

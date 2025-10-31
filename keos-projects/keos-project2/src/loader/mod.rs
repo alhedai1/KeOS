@@ -131,7 +131,7 @@
 pub mod elf;
 pub mod stack_builder;
 
-use crate::{mm_struct::MmStruct, page_table::PageTable, pager::Pager};
+use crate::{mm_struct::MmStruct, pager::Pager};
 use alloc::vec::Vec;
 #[cfg(doc)]
 use elf::Phdr;
@@ -139,7 +139,11 @@ use elf::{Elf, PType};
 #[cfg(doc)]
 use keos::mm::page_table::Permission;
 use keos::{
-    addressing::{Va, PAGE_MASK}, fs::RegularFile, mm::{page_table, Page}, syscall::Registers, KernelError
+    KernelError,
+    addressing::Va,
+    fs::RegularFile,
+    mm::page_table,
+    syscall::Registers,
 };
 use stack_builder::StackBuilder;
 
@@ -202,10 +206,11 @@ impl<P: Pager> LoadContext<P> {
                 );
 
                 // 1. ERROR CHECKS
+                // insufficient memory
                 if memsz < filesz {
                     return Err(KernelError::InvalidArgument);
                 }
-
+                // previously mapped area
                 let mut tmp = vaddr;
                 while tmp.into_usize() < (vaddr.into_usize() + (memsz as usize)) {
                     if let Ok(pte) = self.mm_struct.page_table.walk(tmp) {
@@ -213,8 +218,7 @@ impl<P: Pager> LoadContext<P> {
                             return Err(KernelError::InvalidArgument);
                         }
                     }
-                    tmp = Va::new(tmp.into_usize() + 0x1000)
-                        .ok_or(KernelError::InvalidArgument)?;
+                    tmp = Va::new(tmp.into_usize() + 0x1000).ok_or(KernelError::InvalidArgument)?;
                 }
 
                 // 2. MAP FILE-BACKED PAGES
@@ -241,12 +245,14 @@ impl<P: Pager> LoadContext<P> {
                 if bss_start_offset_in_page != 0 {
                     let va_of_partial_page = Va::new(align_down(file_end, 0x1000)).unwrap();
                     let mem_end_in_page = (vaddr.into_usize() + memsz).min(aligned_file_end);
-                    
+
                     let bss_end_offset_in_page = mem_end_in_page & 0xFFF;
-                    let zero_end = if bss_end_offset_in_page == 0 && mem_end_in_page > va_of_partial_page.into_usize() {
-                        0x1000 
-                    } else { 
-                        bss_end_offset_in_page 
+                    let zero_end = if bss_end_offset_in_page == 0
+                        && mem_end_in_page > va_of_partial_page.into_usize()
+                    {
+                        0x1000
+                    } else {
+                        bss_end_offset_in_page
                     };
 
                     if zero_end > bss_start_offset_in_page {
@@ -267,6 +273,7 @@ impl<P: Pager> LoadContext<P> {
                         Va::new(aligned_file_end).unwrap(),
                         bss_map_size,
                         perm | page_table::Permission::WRITE, // BSS must be writable
+                        // perm,
                         None,
                         0,
                     )?;
@@ -275,7 +282,7 @@ impl<P: Pager> LoadContext<P> {
         }
         Ok(())
     }
-    
+
     /// Builds a user stack and initializes it with arguments.
     ///
     /// This function sets up a new stack for the process by allocating memory,
@@ -343,12 +350,6 @@ impl<P: Pager> LoadContext<P> {
         *regs.rsp() = builder.sp().into_usize(); // rsp points to the fake return address
         regs.gprs.rdi = arguments.len(); // rdi = argc
         regs.gprs.rsi = argv_ptr; // rsi = argv
-
-        // DEBUG: Print final registers
-        println!("[build_stack] FINAL REGISTERS:"); // DEBUG
-        println!("  -> rsp (stack ptr):   0x{:x}", regs.rsp()); // DEBUG
-        println!("  -> rdi (argc):        {}", regs.gprs.rdi); // DEBUG
-        println!("  -> rsi (argv ptr):  0x{:x}", regs.gprs.rsi); // DEBUG
 
         Ok(())
     }
